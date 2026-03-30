@@ -312,12 +312,6 @@ async function main() {
     printHelp();
     process.exit(1);
   }
-
-  const expanded = expandAllFlag(parsed);
-  if (!parsed.valid) {
-    console.error('\nErrors:\n  ' + parsed.errors.join('\n  '));
-    process.exit(1);
-  }
   parsed.errors.forEach(e => logger.warn(e));
 
   logger.info(`Collections : ${parsed.collections.join(', ')  || '(none)'}`);
