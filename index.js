@@ -1,225 +1,156 @@
 'use strict';
 
-/**
- * index.js
- * Entry point for the Strapi v3 → v5 migration middleware.
- *
- * FIX: locale is included inside the data object (not at root) when creating v5 entries.
- * FIX: publishedAt is handled explicitly — published v3 entries are published in v5.
- * FIX: stateManager.setIdMapping now saves immediately after each entry.
- * FIX: migrateLocales receives updated signature (no stateManager import needed in i18nHandler).
- */
-
-// Load .env FIRST — before any other module reads process.env
+// MUST be first — loads .env before any module reads process.env
 require('dotenv').config();
 
-const { parseArgs, printHelp } = require('./lib/cliParser');
+const { parseArgs, printHelp }  = require('./lib/cliParser');
 const { validateCollections, validateSingleTypes } = require('./lib/slugValidator');
-const stateManager = require('./lib/stateManager');
-const logger       = require('./lib/logger');
+const state   = require('./lib/stateManager');
+const logger  = require('./lib/logger');
 const { v3, v5, sleep } = require('./lib/apiClient');
 const { mapFields }     = require('./lib/fieldMapper');
-const { migrateLocales, migrateSingleTypeLocales, extractLocales } = require('./lib/i18nHandler');
+const { migrateLocales, migrateSingleTypeLocales, getLocales } = require('./lib/i18nHandler');
 
-const BATCH_SIZE         = () => parseInt(process.env.BATCH_SIZE  || '100',   10);
-const DELAY_MS           = () => parseInt(process.env.DELAY_MS    || '30000', 10);
-const MAX_ENTRY_RETRIES  = 3;
+const BATCH       = () => parseInt(process.env.BATCH_SIZE  || '100',   10);
+const DELAY       = () => parseInt(process.env.DELAY_MS    || '5000',  10);
+const MAX_TRIES   = 3;
 
-// ── Banner ────────────────────────────────────────────────────────────────────
-function printBanner() {
-  console.log('\n' + '═'.repeat(70));
-  console.log('  Strapi v3.6.8 → v5  Migration Middleware');
-  console.log('═'.repeat(70));
-  console.log(`  V3 URL    : ${process.env.STRAPI_V3_URL || '(not set)'}`);
-  console.log(`  V5 URL    : ${process.env.STRAPI_V5_URL || '(not set)'}`);
-  console.log(`  Batch     : ${BATCH_SIZE()} entries / call`);
-  console.log(`  Delay     : ${DELAY_MS()}ms between calls`);
-  console.log(`  Log file  : ${logger.getLogFilePath()}`);
-  console.log('═'.repeat(70) + '\n');
-}
-
-// ── Env check ─────────────────────────────────────────────────────────────────
+// ── Startup checks ────────────────────────────────────────────────────────────
 function checkEnv() {
-  const required = ['STRAPI_V3_URL', 'STRAPI_V5_URL'];
-  const missing  = required.filter(k => !process.env[k]);
+  const missing = ['STRAPI_V3_URL', 'STRAPI_V5_URL'].filter(k => !process.env[k]);
   if (missing.length) {
-    logger.error(`Missing required env vars: ${missing.join(', ')}`);
-    logger.error('Check your .env file. See .env.example for reference.');
+    console.error(`Missing required env vars: ${missing.join(', ')}`);
     process.exit(1);
   }
 }
 
-// ── Default locale helper ─────────────────────────────────────────────────────
-function getDefaultLocale() {
-  return (process.env.SUPPORTED_LOCALES || 'en').split(',')[0].trim();
+function banner() {
+  console.log('\n' + '═'.repeat(68));
+  console.log('  Strapi v3 → v5  Migration');
+  console.log('═'.repeat(68));
+  console.log(`  V3  : ${process.env.STRAPI_V3_URL}`);
+  console.log(`  V5  : ${process.env.STRAPI_V5_URL}`);
+  console.log(`  Log : ${logger.getLogFilePath()}`);
+  console.log('═'.repeat(68) + '\n');
 }
 
-// ── Publish a v5 entry if it was published in v3 ─────────────────────────────
-/**
- * v3 published entries have published_at set (non-null).
- * In v5, entries are created as drafts by default.
- * We call the publish action to match the v3 state.
- */
-async function publishIfNeeded(slug, v5Id, v3Entry, locale) {
-  // v3 uses published_at (snake_case); it's non-null when published
-  const wasPublished = v3Entry.published_at != null || v3Entry.publishedAt != null;
-  if (!wasPublished) return; // draft — leave as-is in v5
-
-  try {
-    const result = await v5.publish(slug, v5Id);
-    if (result.error) {
-      logger.warn(`Could not publish ${slug}/${v5Id}: ${result.error}`, slug, v3Entry.id, locale);
-    } else {
-      logger.info(`Published ${slug}/${v5Id} in v5.`, slug, v3Entry.id, locale);
-    }
-  } catch (err) {
-    logger.warn(`Exception publishing ${slug}/${v5Id}: ${err.message}`, slug, v3Entry.id, locale);
-  }
+// ── Publish helper ────────────────────────────────────────────────────────────
+// v3 published entries have published_at set. v5 creates drafts by default.
+async function publishIfNeeded(slug, v5Id, v3Entry) {
+  const wasPublished = v3Entry.published_at != null;
+  if (!wasPublished) return;
+  const r = await v5.publish(slug, v5Id);
+  if (r.error) logger.warn(`Publish failed ${slug}/${v5Id}: ${r.error}`, slug, v3Entry.id);
+  else         logger.info(`Published ${slug} v5:${v5Id}`, slug, v3Entry.id);
 }
 
-// ── Migrate a single collection entry ─────────────────────────────────────────
-async function migrateEntry(v3Entry, slug) {
-  const v3Id = v3Entry?.id;
-  if (v3Id == null) {
-    logger.warn('Entry has no ID — skipping.', slug);
-    return { success: false, skipped: false };
-  }
+// ── Migrate one collection entry ──────────────────────────────────────────────
+async function migrateEntry(entry, slug) {
+  const v3Id = entry?.id;
+  if (v3Id == null) { logger.warn('Entry missing id', slug); return { ok: false, skip: false }; }
 
-  // Already permanently failed in a previous run
-  if (stateManager.isFailed(slug, v3Id)) {
-    logger.skip('Permanently failed in previous run. Skipping.', slug, v3Id);
-    return { success: false, skipped: true };
-  }
+  if (state.isFailed(slug, v3Id))   { logger.skip('Permanently failed. Skipping.', slug, v3Id); return { ok: false, skip: true }; }
+  if (state.isMigrated(slug, v3Id)) { logger.skip(`Already done → v5:${state.getV5Id(slug, v3Id)}`, slug, v3Id); return { ok: true, skip: true }; }
 
-  // Already successfully migrated
-  if (stateManager.isAlreadyMigrated(slug, v3Id)) {
-    const v5Id = stateManager.getV5Id(slug, v3Id);
-    logger.skip(`Already migrated → v5_id:${v5Id}. Skipping.`, slug, v3Id);
-    return { success: true, skipped: true };
-  }
+  const locale = entry.locale || (process.env.SUPPORTED_LOCALES || 'en').split(',')[0].trim();
+  let lastErr  = null;
 
-  const defaultLocale = v3Entry.locale || getDefaultLocale();
-  let lastError = null;
-
-  for (let attempt = 1; attempt <= MAX_ENTRY_RETRIES; attempt++) {
+  for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
     try {
-      logger.fetch(`Attempt ${attempt}/${MAX_ENTRY_RETRIES}`, slug, v3Id, defaultLocale);
+      logger.fetch(`Attempt ${attempt}/${MAX_TRIES}`, slug, v3Id, locale);
 
-      // ── Map all fields ─────────────────────────────────────────────────────
-      const v5Data = await mapFields(v3Entry, slug, v3Id, defaultLocale);
+      // Map all fields
+      const data = await mapFields(entry, slug, v3Id, locale);
+      delete data.localizations;
+      delete data.publishedAt;
+      data.locale = locale;
 
-      // Strip v5-managed fields
-      delete v5Data.localizations;
-      delete v5Data.publishedAt;  // handled separately via publish action
+      // Create in v5
+      const r = await v5.create(slug, { data });
+      if (r.error) throw new Error(`v5 create failed (${r.status}): ${r.error}`);
 
-      // FIX: locale goes inside data object
-      v5Data.locale = defaultLocale;
+      const v5Id = r.data?.data?.id ?? r.data?.id;
+      if (!v5Id) throw new Error('v5 create returned no id');
 
-      // ── Create entry in v5 ─────────────────────────────────────────────────
-      const createResult = await v5.create(slug, { data: v5Data });
-      if (createResult.error) {
-        throw new Error(`v5 create failed (HTTP ${createResult.statusCode}): ${createResult.error}`);
-      }
+      state.setIdMapping(slug, v3Id, v5Id);
+      logger.create(`v3:${v3Id} → v5:${v5Id}`, slug, v3Id, locale);
 
-      // v5 response: { data: { id, attributes } }
-      const v5Id = createResult.data?.data?.id ?? createResult.data?.id ?? null;
-      if (v5Id == null) throw new Error('v5 create returned no ID');
+      // Publish if the v3 entry was published
+      await publishIfNeeded(slug, v5Id, entry);
 
-      // FIX: save ID mapping immediately (not deferred to page end)
-      stateManager.setIdMapping(slug, v3Id, v5Id);
-      logger.create(`Created in v5 id:${v5Id}`, slug, v3Id, defaultLocale);
+      // Migrate all other locales
+      const locRes = await migrateLocales(entry, slug, v5Id, locale);
+      const failed = locRes.filter(l => !l.ok).map(l => l.locale);
+      if (failed.length) logger.warn(`Locale failures: ${failed.join(', ')}`, slug, v3Id);
 
-      // ── Publish if needed ──────────────────────────────────────────────────
-      await publishIfNeeded(slug, v5Id, v3Entry, defaultLocale);
+      return { ok: true, skip: false };
 
-      // ── Migrate other locale variants ──────────────────────────────────────
-      const localeResults = await migrateLocales(v3Entry, slug, v5Id, defaultLocale);
-      const failedLocales = localeResults.filter(r => !r.success).map(r => r.locale);
-      if (failedLocales.length) {
-        logger.warn(`Failed locales for v3_id=${v3Id}: ${failedLocales.join(', ')}`, slug, v3Id);
-      }
-
-      return { success: true, skipped: false };
-
-    } catch (err) {
-      lastError = err.message;
-      stateManager.incrementRetry(slug, v3Id);
-      logger.error(`Attempt ${attempt} failed: ${err.message}`, slug, v3Id, defaultLocale);
-
-      if (attempt < MAX_ENTRY_RETRIES) {
-        const backoffMs = 5000 * attempt;
-        logger.warn(`Retrying in ${backoffMs}ms...`, slug, v3Id);
-        await sleep(backoffMs);
-      }
+    } catch (e) {
+      lastErr = e.message;
+      state.bumpRetry(slug, v3Id);
+      logger.error(`Attempt ${attempt} failed: ${e.message}`, slug, v3Id, locale);
+      if (attempt < MAX_TRIES) await sleep(4000 * attempt);
     }
   }
 
-  stateManager.markFailed(slug, v3Id);
-  logger.error(`Permanently failed after ${MAX_ENTRY_RETRIES} attempts: ${lastError}`, slug, v3Id);
-  return { success: false, skipped: false };
+  state.markFailed(slug, v3Id);
+  logger.error(`Permanently failed: ${lastErr}`, slug, v3Id);
+  return { ok: false, skip: false };
 }
 
 // ── Migrate a collection ──────────────────────────────────────────────────────
 async function migrateCollection(slug) {
   logger.separator();
-  logger.info(`Starting collection: "${slug}"`);
-  stateManager.initSlug(slug, 'collection');
+  logger.info(`Collection: "${slug}"`);
+  state.initSlug(slug, 'collection');
 
-  if (stateManager.isDone(slug)) {
-    logger.info(`"${slug}" already fully migrated. Skipping.`);
+  if (state.isDone(slug)) {
+    logger.info(`"${slug}" already complete.`);
     return { total: 0, success: 0, skipped: 1, failed: 0 };
   }
 
   const stats         = { total: 0, success: 0, skipped: 0, failed: 0 };
-  const defaultLocale = getDefaultLocale();
-  const batchSize     = BATCH_SIZE();
+  const defaultLocale = (process.env.SUPPORTED_LOCALES || 'en').split(',')[0].trim();
+  const batchSize     = BATCH();
 
-  // Get total entry count (with locale fallback)
   const total = await v3.getCount(slug, defaultLocale);
   stats.total = total;
-  logger.info(`Total entries in "${slug}" (locale:${defaultLocale}): ${total}`);
+  logger.info(`Total: ${total} entries (locale: ${defaultLocale})`, slug);
 
-  const lastPage  = stateManager.getLastPage(slug);
-  const startPage = lastPage + 1; // resume from next unprocessed page
+  const lastPage   = state.getLastPage(slug);
+  const startPage  = lastPage + 1;
   const totalPages = total > 0 ? Math.ceil(total / batchSize) : 1;
 
-  logger.info(`Pages: ${totalPages} | Resuming from page ${startPage + 1}`);
+  logger.info(`Pages: ${totalPages}, resuming from page ${startPage + 1}`, slug);
 
   for (let page = startPage; page < totalPages; page++) {
     const start = page * batchSize;
-    logger.fetch(`Page ${page + 1}/${totalPages} — fetching ${batchSize} entries from offset ${start}`, slug);
+    logger.fetch(`Page ${page + 1}/${totalPages} (offset ${start})`, slug);
 
-    const batchResult = await v3.getCollection(slug, start, batchSize, defaultLocale);
-
-    if (batchResult.error) {
-      logger.error(`Failed to fetch page ${page + 1}: ${batchResult.error}`, slug);
-      // Don't mark as done — will retry on next run
-      await sleep(DELAY_MS());
+    const r = await v3.getCollection(slug, start, batchSize, defaultLocale);
+    if (r.error) {
+      logger.error(`Fetch failed page ${page + 1}: ${r.error}`, slug);
+      await sleep(DELAY());
       continue;
     }
 
-    const entries = Array.isArray(batchResult.data) ? batchResult.data : [];
-    logger.info(`Got ${entries.length} entries on page ${page + 1}`, slug);
+    const entries = Array.isArray(r.data) ? r.data : [];
+    logger.info(`Got ${entries.length} entries`, slug);
 
     for (const entry of entries) {
-      const result = await migrateEntry(entry, slug);
-      if (result.skipped)        stats.skipped++;
-      else if (result.success)   stats.success++;
-      else                       stats.failed++;
+      const res = await migrateEntry(entry, slug);
+      if (res.skip)       stats.skipped++;
+      else if (res.ok)    stats.success++;
+      else                stats.failed++;
     }
 
-    // Mark page complete and checkpoint
-    stateManager.setLastPage(slug, page);
-    logger.info(
-      `Page ${page + 1} done — success:${stats.success} skipped:${stats.skipped} failed:${stats.failed}`,
-      slug
-    );
+    state.setLastPage(slug, page);
+    logger.info(`Page ${page + 1} done — ok:${stats.success} skip:${stats.skipped} fail:${stats.failed}`, slug);
 
-    // If we got fewer entries than the batch size, we've reached the last page
     if (entries.length < batchSize) break;
   }
 
-  stateManager.markDone(slug);
+  state.markDone(slug);
   logger.summary(slug, stats);
   return stats;
 }
@@ -227,67 +158,57 @@ async function migrateCollection(slug) {
 // ── Migrate a single type ─────────────────────────────────────────────────────
 async function migrateSingleType(slug) {
   logger.separator();
-  logger.info(`Starting single type: "${slug}"`);
-  stateManager.initSlug(slug, 'singleType');
+  logger.info(`Single type: "${slug}"`);
+  state.initSlug(slug, 'singleType');
 
-  if (stateManager.isDone(slug)) {
-    logger.info(`"${slug}" already migrated. Skipping.`);
+  if (state.isDone(slug)) {
+    logger.info(`"${slug}" already complete.`);
     return { total: 1, success: 0, skipped: 1, failed: 0 };
   }
 
   const stats         = { total: 1, success: 0, skipped: 0, failed: 0 };
-  const defaultLocale = getDefaultLocale();
+  const defaultLocale = (process.env.SUPPORTED_LOCALES || 'en').split(',')[0].trim();
+  let   lastErr       = null;
 
-  const v3Result = await v3.getSingleType(slug, defaultLocale);
-  if (v3Result.error || !v3Result.data) {
-    logger.error(`Failed to fetch single type "${slug}" from v3: ${v3Result.error}`, slug);
+  const r = await v3.getSingleType(slug, defaultLocale);
+  if (r.error || !r.data) {
+    logger.error(`Failed to fetch "${slug}" from v3: ${r.error}`, slug);
     stats.failed = 1;
     logger.summary(slug, stats);
     return stats;
   }
 
-  const v3Entry   = v3Result.data;
-  const allLocales = extractLocales(v3Entry);
-  logger.info(`Single type "${slug}" locales: ${allLocales.join(', ')}`, slug);
+  const entry = r.data;
+  logger.info(`Locales: ${getLocales(entry).join(', ')}`, slug);
 
-  let lastError = null;
-
-  for (let attempt = 1; attempt <= MAX_ENTRY_RETRIES; attempt++) {
+  for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
     try {
-      const v5Data = await mapFields(v3Entry, slug, null, defaultLocale);
-      delete v5Data.localizations;
-      delete v5Data.publishedAt;
-      v5Data.locale = defaultLocale;
+      const data = await mapFields(entry, slug, null, defaultLocale);
+      delete data.localizations; delete data.publishedAt;
+      data.locale = defaultLocale;
 
-      // Single types use PUT in v5
-      const putResult = await v5.updateSingleType(slug, { data: v5Data }, defaultLocale);
-      if (putResult.error) {
-        throw new Error(`v5 PUT failed (HTTP ${putResult.statusCode}): ${putResult.error}`);
-      }
+      const upd = await v5.updateSingleType(slug, { data }, defaultLocale);
+      if (upd.error) throw new Error(`v5 PUT failed (${upd.status}): ${upd.error}`);
 
-      const v5Id = putResult.data?.data?.id ?? putResult.data?.id ?? null;
-      logger.update(`Single type "${slug}" updated in v5 (locale:${defaultLocale})`, slug, null, defaultLocale);
+      const v5Id = upd.data?.data?.id ?? upd.data?.id ?? null;
+      logger.update(`"${slug}" updated in v5 (locale: ${defaultLocale})`, slug, null, defaultLocale);
 
-      // Publish if needed
-      if (v5Id) await publishIfNeeded(slug, v5Id, v3Entry, defaultLocale);
-
-      // Migrate other locales
-      await migrateSingleTypeLocales(slug, v3Entry, defaultLocale);
+      if (v5Id) await publishIfNeeded(slug, v5Id, entry);
+      await migrateSingleTypeLocales(slug, entry, defaultLocale);
 
       stats.success = 1;
-      stateManager.markDone(slug);
+      state.markDone(slug);
       break;
-
-    } catch (err) {
-      lastError = err.message;
-      logger.error(`Attempt ${attempt} failed for single type "${slug}": ${err.message}`, slug);
-      if (attempt < MAX_ENTRY_RETRIES) await sleep(5000 * attempt);
+    } catch (e) {
+      lastErr = e.message;
+      logger.error(`Attempt ${attempt} failed: ${e.message}`, slug);
+      if (attempt < MAX_TRIES) await sleep(4000 * attempt);
     }
   }
 
-  if (stats.success === 0) {
+  if (!stats.success) {
     stats.failed = 1;
-    logger.error(`Single type "${slug}" permanently failed: ${lastError}`, slug);
+    logger.error(`"${slug}" permanently failed: ${lastErr}`, slug);
   }
 
   logger.summary(slug, stats);
@@ -296,75 +217,66 @@ async function migrateSingleType(slug) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
-  printBanner();
+  banner();
   checkEnv();
 
-  const parsed = parseArgs(process.argv);
+  const args = parseArgs(process.argv);
 
-  if (parsed.showHelp) {
+  if (args.showHelp) {
     printHelp();
-    if (parsed.errors.length) console.error('\nErrors:\n  ' + parsed.errors.join('\n  '));
-    process.exit(parsed.valid ? 0 : 1);
+    if (args.errors.length) console.error('\n' + args.errors.join('\n'));
+    process.exit(args.valid ? 0 : 1);
   }
 
-  if (!parsed.valid) {
-    console.error('\nErrors:\n  ' + parsed.errors.join('\n  '));
+  if (!args.valid) {
+    console.error(args.errors.join('\n'));
     printHelp();
     process.exit(1);
   }
-  parsed.errors.forEach(e => logger.warn(e));
 
-  logger.info(`Collections : ${parsed.collections.join(', ')  || '(none)'}`);
-  logger.info(`Single types: ${parsed.singleTypes.join(', ') || '(none)'}`);
+  if (args.errors.length) args.errors.forEach(e => logger.warn(e));
 
-  // Validate slugs against v3
-  logger.info('Validating slugs against v3 API...');
-  const validCollections = await validateCollections(parsed.collections);
-  const validSingleTypes = await validateSingleTypes(parsed.singleTypes);
+  logger.info(`Collections : ${args.collections.join(', ')  || '(none)'}`);
+  logger.info(`Single types: ${args.singleTypes.join(', ') || '(none)'}`);
 
-  if (!validCollections.length && !validSingleTypes.length) {
-    logger.error('No valid migration targets found after slug validation. Exiting.');
+  logger.info('Validating slugs...');
+  const validCols    = await validateCollections(args.collections);
+  const validSingles = await validateSingleTypes(args.singleTypes);
+
+  if (!validCols.length && !validSingles.length) {
+    logger.error('No valid migration targets. Exiting.');
     process.exit(1);
   }
 
-  logger.info(`Valid collections : ${validCollections.join(', ')  || '(none)'}`);
-  logger.info(`Valid single types: ${validSingleTypes.join(', ') || '(none)'}`);
+  state.load();
 
-  stateManager.load();
+  const results = {};
 
-  const grandResults = {};
-
-  for (const slug of validCollections) {
+  for (const slug of validCols) {
     try {
-      grandResults[slug] = await migrateCollection(slug);
-    } catch (err) {
-      logger.error(`Unhandled exception on collection "${slug}": ${err.message}`);
-      logger.error(err.stack || '(no stack)');
-      grandResults[slug] = { total: 0, success: 0, skipped: 0, failed: 1 };
+      results[slug] = await migrateCollection(slug);
+    } catch (e) {
+      logger.error(`Unhandled: ${e.message}\n${e.stack}`);
+      results[slug] = { total: 0, success: 0, skipped: 0, failed: 1 };
     }
   }
 
-  for (const slug of validSingleTypes) {
+  for (const slug of validSingles) {
     try {
-      grandResults[slug] = await migrateSingleType(slug);
-    } catch (err) {
-      logger.error(`Unhandled exception on single type "${slug}": ${err.message}`);
-      logger.error(err.stack || '(no stack)');
-      grandResults[slug] = { total: 1, success: 0, skipped: 0, failed: 1 };
+      results[slug] = await migrateSingleType(slug);
+    } catch (e) {
+      logger.error(`Unhandled: ${e.message}\n${e.stack}`);
+      results[slug] = { total: 1, success: 0, skipped: 0, failed: 1 };
     }
   }
 
-  logger.grandSummary(grandResults);
-  stateManager.flush();
-  logger.info('Migration complete.');
+  logger.grandSummary(results);
+  state.save();
+  logger.info('Done.');
   process.exit(0);
 }
 
-// Last-resort safety nets
-process.on('uncaughtException',  err => { console.error('[FATAL] UncaughtException:', err.message, err.stack); });
-process.on('unhandledRejection', err => { console.error('[FATAL] UnhandledRejection:', err); });
+process.on('uncaughtException',  e => logger.error(`[FATAL] ${e.message}\n${e.stack}`));
+process.on('unhandledRejection', e => logger.error(`[FATAL] ${e}`));
 
-main().catch(err => {
-  console.error('[FATAL] main() threw:', err.message, err.stack);
-  process.exit(1);
-});
+main().catch(e => { logger.error(`[FATAL] ${e.message}\n${e.stack}`); process.exit(1); });
