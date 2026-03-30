@@ -13,7 +13,7 @@
 // Load .env FIRST — before any other module reads process.env
 require('dotenv').config();
 
-const { parseArgs, expandAllFlag, printHelp } = require('./lib/cliParser');
+const { parseArgs, printHelp } = require('./lib/cliParser');
 const { validateCollections, validateSingleTypes } = require('./lib/slugValidator');
 const stateManager = require('./lib/stateManager');
 const logger       = require('./lib/logger');
@@ -40,7 +40,7 @@ function printBanner() {
 
 // ── Env check ─────────────────────────────────────────────────────────────────
 function checkEnv() {
-  const required = ['STRAPI_V3_URL', 'STRAPI_V5_URL', 'STRAPI_V3_TOKEN', 'STRAPI_V5_TOKEN'];
+  const required = ['STRAPI_V3_URL', 'STRAPI_V5_URL'];
   const missing  = required.filter(k => !process.env[k]);
   if (missing.length) {
     logger.error(`Missing required env vars: ${missing.join(', ')}`);
@@ -314,19 +314,19 @@ async function main() {
   }
 
   const expanded = expandAllFlag(parsed);
-  if (!expanded.valid) {
-    console.error('\nErrors:\n  ' + expanded.errors.join('\n  '));
+  if (!parsed.valid) {
+    console.error('\nErrors:\n  ' + parsed.errors.join('\n  '));
     process.exit(1);
   }
-  expanded.errors.forEach(e => logger.warn(e));
+  parsed.errors.forEach(e => logger.warn(e));
 
-  logger.info(`Collections : ${expanded.collections.join(', ')  || '(none)'}`);
-  logger.info(`Single types: ${expanded.singleTypes.join(', ') || '(none)'}`);
+  logger.info(`Collections : ${parsed.collections.join(', ')  || '(none)'}`);
+  logger.info(`Single types: ${parsed.singleTypes.join(', ') || '(none)'}`);
 
   // Validate slugs against v3
   logger.info('Validating slugs against v3 API...');
-  const validCollections = await validateCollections(expanded.collections);
-  const validSingleTypes = await validateSingleTypes(expanded.singleTypes);
+  const validCollections = await validateCollections(parsed.collections);
+  const validSingleTypes = await validateSingleTypes(parsed.singleTypes);
 
   if (!validCollections.length && !validSingleTypes.length) {
     logger.error('No valid migration targets found after slug validation. Exiting.');
