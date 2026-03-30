@@ -1,0 +1,123 @@
+{
+  "kind": "collectionType",
+  "collectionName": "env_sync_logs",
+  "info": {
+    "singularName": "env-sync-log",
+    "pluralName": "env-sync-logs",
+    "displayName": "Env Sync Log",
+    "description": "Audit trail for every content sync operation triggered between environments"
+  },
+  "options": {
+    "draftAndPublish": false,
+    "comment": "Managed by strapi-plugin-env-sync. Do not modify manually."
+  },
+  "pluginOptions": {
+    "content-manager": {
+      "visible": false
+    },
+    "content-type-builder": {
+      "visible": false
+    }
+  },
+  "attributes": {
+    "triggeredBy": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "admin::user",
+      "comment": "The admin user who triggered this sync"
+    },
+    "contentType": {
+      "type": "string",
+      "required": true,
+      "comment": "Strapi UID, e.g. api::article.article"
+    },
+    "documentId": {
+      "type": "string",
+      "required": true,
+      "comment": "Strapi v5 documentId of the synced document"
+    },
+    "locale": {
+      "type": "string",
+      "default": null,
+      "comment": "Locale being synced, or null for non-i18n content"
+    },
+    "sourceEnv": {
+      "type": "enumeration",
+      "enum": ["SIT", "QA", "UAT", "PROD"],
+      "required": true
+    },
+    "targetEnv": {
+      "type": "enumeration",
+      "enum": ["SIT", "QA", "UAT", "PROD"],
+      "required": true
+    },
+    "status": {
+      "type": "enumeration",
+      "enum": ["pending", "in_progress", "success", "failed", "rolled_back", "dry_run"],
+      "required": true,
+      "default": "pending"
+    },
+    "conflictStrategy": {
+      "type": "enumeration",
+      "enum": ["source-wins", "target-wins", "manual"],
+      "required": true,
+      "default": "source-wins"
+    },
+    "isDryRun": {
+      "type": "boolean",
+      "default": false,
+      "comment": "If true, no data was written — this was a preview run"
+    },
+    "diffSummary": {
+      "type": "json",
+      "comment": "Structured diff: { fieldsChanged: [], relationsUpdated: [], mediaReuploaded: [], localesSynced: [] }"
+    },
+    "payload": {
+      "type": "json",
+      "comment": "Full serialised document payload sent to target (retained for debugging)"
+    },
+    "errorMessage": {
+      "type": "text",
+      "default": null,
+      "comment": "Human-readable error message if status = failed"
+    },
+    "errorStack": {
+      "type": "text",
+      "default": null,
+      "comment": "Stack trace for debugging — only stored in non-production envs"
+    },
+    "snapshotId": {
+      "type": "string",
+      "default": null,
+      "comment": "References env-sync-snapshot.documentId for rollback"
+    },
+    "duration": {
+      "type": "integer",
+      "default": null,
+      "comment": "Total sync duration in milliseconds"
+    },
+    "retryCount": {
+      "type": "integer",
+      "default": 0,
+      "comment": "Number of retry attempts made before success or final failure"
+    },
+    "triggeredAt": {
+      "type": "datetime",
+      "required": true,
+      "comment": "When the sync was initiated"
+    },
+    "completedAt": {
+      "type": "datetime",
+      "default": null,
+      "comment": "When the sync completed (success or failure)"
+    },
+    "targetUrl": {
+      "type": "string",
+      "comment": "The URL of the target environment that received the sync"
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "comment": "Unique key preventing duplicate concurrent syncs: {documentId}:{targetEnv}:{triggeredAt}"
+    }
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "kind": "collectionType",
+  "collectionName": "env_sync_snapshots",
+  "info": {
+    "singularName": "env-sync-snapshot",
+    "pluralName": "env-sync-snapshots",
+    "displayName": "Env Sync Snapshot",
+    "description": "Point-in-time snapshot of a document taken before a sync overwrites it — used for rollback"
+  },
+  "options": {
+    "draftAndPublish": false,
+    "comment": "Managed by strapi-plugin-env-sync. Do not modify manually."
+  },
+  "pluginOptions": {
+    "content-manager": {
+      "visible": false
+    },
+    "content-type-builder": {
+      "visible": false
+    }
+  },
+  "attributes": {
+    "contentType": {
+      "type": "string",
+      "required": true,
+      "comment": "Strapi UID of the snapshotted content type"
+    },
+    "documentId": {
+      "type": "string",
+      "required": true,
+      "comment": "documentId of the document that was snapshotted"
+    },
+    "locale": {
+      "type": "string",
+      "default": null,
+      "comment": "Locale of the snapshotted document version, null for non-i18n"
+    },
+    "environment": {
+      "type": "enumeration",
+      "enum": ["SIT", "QA", "UAT", "PROD"],
+      "required": true,
+      "comment": "The environment where this snapshot was taken"
+    },
+    "snapshotData": {
+      "type": "json",
+      "required": true,
+      "comment": "Full serialised document data at the time of snapshot, including all locales"
+    },
+    "mediaManifest": {
+      "type": "json",
+      "comment": "List of media files referenced in this snapshot: [{ id, hash, url, name }]"
+    },
+    "takenAt": {
+      "type": "datetime",
+      "required": true,
+      "comment": "When the snapshot was captured"
+    },
+    "takenBy": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "admin::user",
+      "comment": "Admin user who triggered the sync that caused this snapshot"
+    },
+    "logId": {
+      "type": "string",
+      "comment": "References the env-sync-log entry that created this snapshot"
+    },
+    "isRestored": {
+      "type": "boolean",
+      "default": false,
+      "comment": "Set to true once this snapshot has been used to roll back"
+    },
+    "restoredAt": {
+      "type": "datetime",
+      "default": null
+    },
+    "restoredBy": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "admin::user"
+    },
+    "sizeBytes": {
+      "type": "integer",
+      "comment": "Approximate size of snapshotData in bytes — for storage monitoring"
+    },
+    "checksum": {
+      "type": "string",
+      "comment": "SHA-256 hash of snapshotData — integrity verification before restore"
+    }
+  }
+}
