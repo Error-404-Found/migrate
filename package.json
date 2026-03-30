@@ -1,78 +1,21 @@
 {
-  "name": "strapi-plugin-env-sync",
+  "name": "migration",
   "version": "1.0.0",
-  "description": "Enterprise-grade on-demand content synchronization between Strapi v5 environments (SIT → QA → UAT → PROD)",
-  "keywords": [
-    "strapi",
-    "strapi-plugin",
-    "strapi-v5",
-    "content-sync",
-    "environment-sync",
-    "migration"
-  ],
-  "homepage": "https://github.com/your-org/strapi-plugin-env-sync",
-  "license": "MIT",
-  "type": "commonjs",
-  "exports": {
-    "./strapi-server": "./strapi-server.js",
-    "./strapi-admin": "./strapi-admin.js"
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "lib": "lib"
   },
-  "files": [
-    "admin",
-    "server",
-    "strapi-server.js",
-    "strapi-admin.js"
-  ],
   "scripts": {
-    "build": "strapi-plugin build",
-    "watch": "strapi-plugin watch",
-    "test": "jest --forceExit --detectOpenHandles",
-    "test:coverage": "jest --coverage --forceExit --detectOpenHandles",
-    "lint": "eslint . --ext .js,.jsx,.ts,.tsx"
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "strapi": {
-    "name": "env-sync",
-    "displayName": "Environment Sync",
-    "description": "On-demand content synchronization between Strapi environments",
-    "kind": "plugin",
-    "icon": "refresh"
-  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
-    "axios": "^1.6.0",
-    "axios-retry": "^4.0.0",
-    "lodash": "^4.17.21",
-    "p-limit": "^4.0.0",
-    "p-queue": "^7.4.1"
-  },
-  "devDependencies": {
-    "@strapi/strapi": "^5.0.0",
-    "@strapi/design-system": "^2.0.0",
-    "@strapi/icons": "^2.0.0",
-    "jest": "^29.0.0",
-    "jest-environment-node": "^29.0.0",
-    "eslint": "^8.0.0",
-    "react": "^18.0.0",
-    "react-dom": "^18.0.0"
-  },
-  "peerDependencies": {
-    "@strapi/strapi": "^5.0.0",
-    "@strapi/design-system": "^2.0.0",
-    "@strapi/icons": "^2.0.0",
-    "react": "^18.0.0",
-    "react-dom": "^18.0.0"
-  },
-  "jest": {
-    "testEnvironment": "node",
-    "testMatch": [
-      "**/tests/**/*.test.js"
-    ],
-    "collectCoverageFrom": [
-      "server/**/*.js",
-      "!server/content-types/**"
-    ]
-  },
-  "engines": {
-    "node": ">=18.0.0",
-    "npm": ">=8.0.0"
+    "axios": "^1.14.0",
+    "axios-retry": "^4.5.0",
+    "dotenv": "^17.3.1",
+    "form-data": "^4.0.5"
   }
 }
